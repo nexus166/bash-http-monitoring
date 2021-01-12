@@ -1,4 +1,6 @@
 #!/bin/bash
+#!/usr/bin/env bash
+
 # Copyright 2020 - Remy van Elst - https://raymii.org/s/software/Bash_HTTP_Monitoring_Dashboard.html
 # Copyright 2021 - Silvano Zampardi
 # This program is free software: you can redistribute it and/or modify
@@ -15,15 +17,14 @@
 ########################################################################
 # Start of configuration.
 declare -A MONITOR_URLS=(
-	["gist.github.com"]="https://gist.github.com"
-	["github.com"]="https://github.com"
+	["github.com"]="https://github.xcom"
 )
 # The default status code. Can be overridden per URL lower in the script.
 defaultExpectedStatusCode=200
 
 # Expected code for url, key must match MONITOR_URLS[]. Only for URL's you consider UP, but for example require authentication
 declare -A URL_STATUSCODES=(
-	["gist.github.com"]=302
+	#	["github.com"]=200
 )
 # How many curl checks to run at the same time
 maxConcurrentCURLs=12
@@ -39,6 +40,9 @@ title="Status Dashboard"
 
 # Use CGI mode
 cgi=false
+
+# Alert
+sendAlerts="${sendAlerts:-0}"
 
 # Callback URL for failed checks. Script will do a POST request with
 # the following parameters: url, name, expected_status, actual_status, error.
@@ -116,17 +120,18 @@ doRequest() {
 }
 
 recheckFailedChecks() {
-	local -a failFiles=("${tempfolder}"/*.status)
+	local -a failFiles=("${tempfolder}"/FAIL/*.status)
 	if [[ ${#failFiles[@]} -gt 0 ]]; then
 		printf 'Failed checks, re-checking after %ds ..' "${flapRetry}" 1>&2
 		sleep "${flapRetry}"
 		for _f in "${failFiles[@]}"; do
 			if [[ ! -r ${_f} ]]; then continue; fi
-			filenameWithoutExt=${_f%.*}
+			local filenameWithoutExt=${_f%.*}
+			local _name="$(basename "${filenameWithoutExt}")"
 			if [[ "$(jobs -p | wc -l)" -ge ${maxConcurrentCURLs} ]]; then
 				wait -n
 			fi
-			doRequest "${filenameWithoutExt}" "${MONITOR_URLS["${filenameWithoutExt}"]}"
+			doRequest "${_name}" "${MONITOR_URLS["${_name}"]}"
 		done
 		wait
 	fi
@@ -144,68 +149,72 @@ writeOkayChecks() {
 
 doCallbackForFailedChecks() {
 	# If the callback URL is empty, don't do anything.
-	if [[ -z ${callbackURL} ]]; then
+	if [[ -z ${callbackURL} ]] && [[ ${sendAlerts} == 0 ]]; then
 		return
 	fi
 	local -a failFiles=("${tempfolder}"/FAIL/*.status)
 	for _f in "${failFiles[@]}"; do
-		if [[ ! -r ${filename} ]]; then continue; fi
-		filenameWithoutExt=${filename%.*}
-		if [[ -r "${filenameWithoutExt}".error ]]; then
-			curlError="$(<"${filenameWithoutExt}".error)"
-		else
-			curlError="Status code does not match expected code"
+		if [[ ! -r ${_f} ]]; then continue; fi
+		local filenameWithoutExt="$(basename "${_f%.*}")"
+		local _name="$(basename "${filenameWithoutExt}")"
+		local curlError="Status code does not match expected code"
+		if [[ -r "${tempfolder}/FAIL/${filenameWithoutExt}".error ]]; then
+			curlError="$(<"${tempfolder}"/FAIL/"${filenameWithoutExt}".error)"
 		fi
-		url="${MONITOR_URLS["${filenameWithoutExt}"]}"
-		currentStatus="$(<"${filename}")"
-		expectedStatus="000"
-		if [[ -z ${URL_STATUSCODES["${filenameWithoutExt}"]} ]]; then
-			expectedStatus="${defaultExpectedStatusCode}"
-		else
-			expectedStatus="${URL_STATUSCODES[${filenameWithoutExt}]}"
+		local url="${MONITOR_URLS["${filenameWithoutExt}"]}"
+		local currentStatus="$(<"${_f}")"
+		local expectedStatus="${defaultExpectedStatusCode}"
+		if [[ -n ${URL_STATUSCODES["${_name}"]} ]]; then
+			expectedStatus="${URL_STATUSCODES["${_name}"]}"
 		fi
-		jq -cM \
-			--arg url "${url}" \
-			--arg name "${filenameWithoutExt}" \
-			--arg expected_status "${expectedStatus}" \
-			--arg actual_status "${currentStatus}" \
-			--arg error "${curlError}" \
-			'{ url: $url, name: $name, expected_status: $expected_status, actual_status: $actual_status, error: $error }' |
-			curl \
-				--insecure --show-error \
-				--max-time "${defaultTimeOut}" --retry 4 \
-				--silent --output /dev/null \
-				-H "Content-Type: application/json" \
-				--data @- \
-				"${callbackURL}"
+		if [[ -n ${callbackURL} ]]; then
+			jq -cM \
+				--arg url "${url}" \
+				--arg name "${filenameWithoutExt}" \
+				--arg expected_status "${expectedStatus}" \
+				--arg actual_status "${currentStatus}" \
+				--arg error "${curlError}" \
+				'{ url: $url, name: $name, expected_status: $expected_status, actual_status: $actual_status, error: $error }' |
+				curl \
+					--insecure --show-error \
+					--max-time "${defaultTimeOut}" --retry 4 \
+					--silent --output /dev/null \
+					-H "Content-Type: application/json" \
+					--data @- \
+					"${callbackURL}"
+		fi
+		if [[ ${sendAlerts} != 0 ]]; then
+			printf -v _message '*WARNING*: [`%s`] healthcheck (`%s`) failed\nHTTP code / expected: *%d / %d*\nError: `%s`\n' "${_name}" "${MONITOR_URLS["${_name}"]}" "${currentStatus}" "${expectedStatus}" "${curlError}"
+			/usr/local/bin/rocketchat-post -e ":warning:" "${_message}" &
+		fi
 	done
 }
 
 writeFailedChecks() {
 	local -a failFiles=("${tempfolder}"/FAIL/*.status)
-	failCount=${#failFiles[@]}
+	local failCount=${#failFiles[@]}
 	if [[ failCount -gt 0 ]]; then
 		printf '<div class="alert alert-danger" role="alert">\nErrors occured! %d check(s) have failed.\n</div>\n<table class="table">\n<thead><tr>\n<th>Name</th>\n<th>HTTP Status/Expected</th>\n<th>Error</th>\n</tr></thead><tbody>\n' "${failCount}"
-		for filename in "${failFiles[@]}"; do
-			if [[ ! -r ${filename} ]]; then continue; fi
-			filenameWithoutExt=${filename%.*}
+		for _f in "${failFiles[@]}"; do
+			if [[ ! -r ${_f} ]]; then continue; fi
+			local filenameWithoutExt=${_f%.*}
+			local _name="$(basename "${filenameWithoutExt}")"
+			local curlError="Status code does not match expected code"
 			if [[ -r "${filenameWithoutExt}".error ]]; then
 				curlError="$(<"${filenameWithoutExt}".error)"
-			else
-				curlError="Status code does not match expected code"
 			fi
-			status="$(<"${filename}")"
-			printf '<tr class="table-danger"><td>%s\n</td><td>\n' "$(basename "${filenameWithoutExt}")"
-			if [[ -z ${URL_STATUSCODES[${filenameWithoutExt}]} ]]; then
-				printf '%d / %d\n' "${status}" "${defaultExpectedStatusCode}"
-			else
-				printf '%d / %d\n' "${status}" "${URL_STATUSCODES[${filenameWithoutExt}]}"
+			local status="$(<"${_f}")"
+			printf '<tr class="table-danger"><td>%s\n</td><td>\n' "${_name}"
+			local expectedStatus="${defaultExpectedStatusCode}"
+			if [[ -n ${URL_STATUSCODES["${_name}"]} ]]; then
+				expectedStatus="${URL_STATUSCODES["${_name}"]}"
 			fi
+			printf '%d / %d\n' "${status}" "${expectedStatus}"
 			printf '</td><td>%s\n</td></tr>\n' "${curlError}"
 		done
 		printf '<tr><td colspan=3 class="small">All failed checks were attempted again after %ds and failed again.</td></tr>\n</tbody></table>\n' "${flapRetry}"
 	else
-		printf '<div class="alert alert-success" role="alert">\nAll is well, all services are up.\n</div>'
+		printf '<div class="alert alert-success" role="alert">\nAll is well, all %d services are up.\n</div>' "${#MONITOR_URLS[@]}"
 	fi
 }
 
@@ -229,8 +238,10 @@ fi
 start=$("${datecmd}" '+%s%3N')
 
 # try to create folders, if it fails, stop the script.
-tempfolder="$(mktemp -d 2>/dev/null || printf '/tmp/statusmon')"
+declare -x tempfolder="$(mktemp -d 2>/dev/null || printf '/tmp/statusmon')"
 mkdir -p "${tempfolder}"/{FAIL,OK} || exit 1
+# Cleanup the status files at exit
+trap 'rm -fr "${tempfolder}"/{FAIL,OK}' EXIT
 
 # Do the checks parallel
 for key in "${!MONITOR_URLS[@]}"; do
@@ -262,6 +273,3 @@ writeFooter
 
 # Execute the callback for any failed URL's
 doCallbackForFailedChecks
-
-# Cleanup the status files
-rm -fr "${tempfolder}"/{FAIL,OK}
