@@ -1,4 +1,3 @@
-#!/bin/bash
 #!/usr/bin/env bash
 
 # Copyright 2020 - Remy van Elst - https://raymii.org/s/software/Bash_HTTP_Monitoring_Dashboard.html
@@ -17,29 +16,30 @@
 ########################################################################
 # Start of configuration.
 declare -A MONITOR_URLS=(
-	["github.com"]="https://github.xcom"
+	["github.com"]="https://github.com"
+	["bad_github.com"]="https://github.local"
 )
 # The default status code. Can be overridden per URL lower in the script.
-defaultExpectedStatusCode=200
+defaultExpectedStatusCode="${defaultExpectedStatusCode}"
 
 # Expected code for url, key must match MONITOR_URLS[]. Only for URL's you consider UP, but for example require authentication
 declare -A URL_STATUSCODES=(
-	#	["github.com"]=200
+	["github.com"]=200
 )
 # How many curl checks to run at the same time
-maxConcurrentCURLs=12
+maxConcurrentCURLs="${maxConcurrentCURLs:-12}"
 
 # Max timeout of a check in seconds
-defaultTimeOut=10
+defaultTimeOut="${defaultTimeOut:-10}"
 
 # After how many seconds should we re-check any failed checks? (To prevent flapping)
-flapRetry=5
+flapRetry="${flapRetry:-5}"
 
 # Title of the webpage
-title="Status Dashboard"
+title="${title:-'Status Dashboard'}"
 
 # Use CGI mode
-cgi=false
+cgi="${cgi:-0}"
 
 # Alert
 sendAlerts="${sendAlerts:-0}"
@@ -48,6 +48,23 @@ sendAlerts="${sendAlerts:-0}"
 # the following parameters: url, name, expected_status, actual_status, error.
 callbackURL=""
 
+while getopts ":c:C:t:r:T:b:ag" _opt; do
+	case "${_opt}" in
+		c)
+			printf 'Sourcing MONITOR_URLS and URL_STATUSCODES from configuration\n' 1>&2
+			unset MONITOR_URLS URL_STATUSCODES
+			source "${OPTARG}"
+			;;
+		C) maxConcurrentCURLs="${OPTARG}" ;;
+		t) defaultTimeOut="${OPTARG}" ;;
+		r) flapRetry="${OPTARG}" ;;
+		T) title="${OPTARG}" ;;
+		b) callbackURL="${OPTARG}" ;;
+		a) sendAlerts=1 ;;
+		g) cgi=1 ;;
+	esac
+done
+shift $((OPTIND - 1))
 ########################################################################
 
 # function definitions
@@ -88,7 +105,7 @@ doRequest() {
 	local url="${2}"
 	local expectedStatusCode="${defaultExpectedStatusCode}"
 	# check if there is a specific status code for this domain
-	if [[ -n ${URL_STATUSCODES["${name}"]} ]]; then
+	if [[ -v URL_STATUSCODES["${name}"] ]]; then
 		expectedStatusCode=${URL_STATUSCODES["${name}"]}
 	fi
 	# epoch in microseconds, but last chars stripped so it's milliseconds
@@ -164,7 +181,7 @@ doCallbackForFailedChecks() {
 		local url="${MONITOR_URLS["${filenameWithoutExt}"]}"
 		local currentStatus="$(<"${_f}")"
 		local expectedStatus="${defaultExpectedStatusCode}"
-		if [[ -n ${URL_STATUSCODES["${_name}"]} ]]; then
+		if [[ -v URL_STATUSCODES["${_name}"] ]]; then
 			expectedStatus="${URL_STATUSCODES["${_name}"]}"
 		fi
 		if [[ -n ${callbackURL} ]]; then
@@ -206,7 +223,7 @@ writeFailedChecks() {
 			local status="$(<"${_f}")"
 			printf '<tr class="table-danger"><td>%s\n</td><td>\n' "${_name}"
 			local expectedStatus="${defaultExpectedStatusCode}"
-			if [[ -n ${URL_STATUSCODES["${_name}"]} ]]; then
+			if [[ -v URL_STATUSCODES["${_name}"] ]]; then
 				expectedStatus="${URL_STATUSCODES["${_name}"]}"
 			fi
 			printf '%d / %d\n' "${status}" "${expectedStatus}"
@@ -230,7 +247,7 @@ set -eo pipefail
 # patterns which match no files expand to a null string, otherwise later on we'd have *.status as a file...
 shopt -s nullglob
 
-if [[ ${cgi} == true ]]; then
+if [[ ${cgi} != 0 ]]; then
 	printf 'Content-type: text/html\n'
 fi
 
